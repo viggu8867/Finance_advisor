@@ -1,0 +1,5 @@
+{
+  "name": "FinAdvisor AI",
+  "description": "A comprehensive financial advisory application powered by Gemini. It offers AI-driven portfolio analysis, goal setting, market insights, and a conversational AI assistant to help you navigate your financial journey.",
+  "requestFramePermissions": []
+}
