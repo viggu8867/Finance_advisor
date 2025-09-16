@@ -4,7 +4,7 @@ import type { PortfolioItem, TransactionResult } from '../types';
 import Card from './common/Card';
 import Button from './common/Button';
 import Spinner from './common/Spinner';
-import { analyzePortfolio, getPortfolioCheckinSummary } from '../services/geminiService';
+import { analyzePortfolio, getPortfolioCheckinSummary, fetchQuotes, fetchHistory } from '../services/geminiService';
 import EditIcon from './icons/EditIcon';
 import DeleteIcon from './icons/DeleteIcon';
 import { stockList } from '../utils/stockData';
@@ -34,16 +34,24 @@ const StockFormModal: React.FC<{
     }, [formData.shares, formData.avgPrice]);
 
 
-    const handleStockSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const handleStockSelect = async (e: React.ChangeEvent<HTMLSelectElement>) => {
         const selectedTicker = e.target.value;
         const selectedStock = stockList.find(s => s.ticker === selectedTicker);
         
         if (selectedStock) {
+            // Prefill avgPrice from live quote to match quote currency
+            let livePrice = '';
+            try {
+                const q = await fetchQuotes([selectedStock.ticker]);
+                if (q[selectedStock.ticker]) {
+                    livePrice = String(q[selectedStock.ticker]);
+                }
+            } catch (_) {}
             setFormData(prev => ({
                 ...prev,
                 name: selectedStock.name,
                 ticker: selectedStock.ticker,
-                avgPrice: selectedStock.price.toString(),
+                avgPrice: livePrice || String(selectedStock.price) || prev.avgPrice || '',
             }));
         } else {
             // Reset if the placeholder is selected
@@ -76,11 +84,17 @@ const StockFormModal: React.FC<{
             return;
         }
 
+        const avgPriceNumber = parseFloat(formData.avgPrice);
+        if (isNaN(avgPriceNumber) || avgPriceNumber <= 0) {
+            setError('Average price must be a positive number.');
+            return;
+        }
+
         const result = onSave({
             name: formData.name,
             ticker: formData.ticker.toUpperCase(),
             shares: sharesNumber,
-            avgPrice: parseFloat(formData.avgPrice),
+            avgPrice: avgPriceNumber,
         });
 
         if (result.success) {
@@ -127,8 +141,8 @@ const StockFormModal: React.FC<{
                             <input type="number" name="shares" id="shares" value={formData.shares} onChange={handleChange} step="any" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm text-base-content bg-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent" placeholder="e.g., 50" required />
                         </div>
                         <div>
-                           <label htmlFor="avgPrice" className="block text-sm font-medium text-base-content">Purchase Price (₹)</label>
-                            <input type="text" name="avgPrice" id="avgPrice" value={formData.avgPrice} readOnly className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm text-base-content bg-gray-100 placeholder-gray-500 focus:outline-none" />
+                           <label htmlFor="avgPrice" className="block text-sm font-medium text-base-content">Purchase Price</label>
+                            <input type="number" name="avgPrice" id="avgPrice" value={formData.avgPrice} onChange={handleChange} step="any" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm text-base-content bg-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent" placeholder="e.g., 150.25" required />
                         </div>
                     </div>
                      <div>
@@ -162,20 +176,27 @@ const Portfolio: React.FC = () => {
     const [editingStock, setEditingStock] = useState<PortfolioItem | null>(null);
     const [checkinSummary, setCheckinSummary] = useState('');
     const [isCheckingIn, setIsCheckingIn] = useState(false);
+    const [historySymbol, setHistorySymbol] = useState<string | null>(null);
+    const [historySeries, setHistorySeries] = useState<{ t: number; c: number }[]>([]);
     const { showToast } = useToast();
 
     useEffect(() => {
-        const interval = setInterval(() => {
-            setPortfolio(prevPortfolio =>
-                prevPortfolio.map(stock => {
-                    const change = (Math.random() - 0.5) * 0.01; // +/- 0.5%
-                    const newPrice = stock.currentPrice * (1 + change);
-                    return { ...stock, currentPrice: newPrice };
-                })
-            );
-        }, 3000);
-        return () => clearInterval(interval);
-    }, []);
+        let timer: any;
+        const poll = async () => {
+            try {
+                const symbols = Array.from(new Set(portfolio.map(s => s.ticker)));
+                if (symbols.length === 0) return;
+                const quotes = await fetchQuotes(symbols);
+                setPortfolio(prev => prev.map(s => quotes[s.ticker] ? { ...s, currentPrice: quotes[s.ticker] } : s));
+            } catch (e) {
+                // ignore
+            } finally {
+                timer = setTimeout(poll, 10000); // 10s polling
+            }
+        };
+        poll();
+        return () => timer && clearTimeout(timer);
+    }, [initialPortfolio, portfolio.length]);
 
     const handleAnalyze = async () => {
         setIsLoadingAnalysis(true);
@@ -257,6 +278,13 @@ const Portfolio: React.FC = () => {
             deleteStock(id);
             showToast(`Sold ${stockToSell.ticker} for ₹${saleValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`, 'info');
         }
+    };
+
+    const handleShowHistory = async (symbol: string) => {
+        setHistorySymbol(symbol);
+        const hist = await fetchHistory(symbol, '3mo', '1d');
+        const series = (hist.series || []).map((p: any) => ({ t: p.t, c: p.c }));
+        setHistorySeries(series);
     };
 
     const totalPortfolioValue = useMemo(() => portfolio.reduce((sum, stock) => sum + stock.shares * stock.currentPrice, 0), [portfolio]);
@@ -346,6 +374,7 @@ const Portfolio: React.FC = () => {
                                         <div className="flex items-center gap-4">
                                             <button onClick={() => handleOpenEditModal(item)} title="Edit" className="text-gray-500 hover:text-primary"><EditIcon className="w-5 h-5" /></button>
                                             <button onClick={() => handleDeleteStock(item.id)} title="Delete" className="text-gray-500 hover:text-red-500"><DeleteIcon className="w-5 h-5" /></button>
+                                            <button onClick={() => handleShowHistory(item.ticker)} className="text-gray-500 hover:text-primary">History</button>
                                         </div>
                                     </td>
                                 </tr>
@@ -356,6 +385,38 @@ const Portfolio: React.FC = () => {
             </Card>
 
             {isLoadingAnalysis && <Spinner />}
+
+            {historySymbol && (
+                <Card>
+                    <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-lg font-semibold">Price History: {historySymbol}</h3>
+                        <button onClick={() => { setHistorySymbol(null); setHistorySeries([]); }} className="text-xl font-bold">&times;</button>
+                    </div>
+                    <div className="w-full overflow-x-auto">
+                        <div className="min-w-[300px]">
+                            <svg width="100%" height="200">
+                                {(() => {
+                                    const w = 800; const h = 200; const pad = 20;
+                                    const data = historySeries;
+                                    if (!data.length) return null;
+                                    const xs = data.map(d => d.t);
+                                    const ys = data.map(d => d.c);
+                                    const minX = Math.min(...xs), maxX = Math.max(...xs);
+                                    const minY = Math.min(...ys), maxY = Math.max(...ys);
+                                    const scaleX = (x: number) => pad + (w - 2*pad) * (x - minX) / (maxX - minX || 1);
+                                    const scaleY = (y: number) => h - pad - (h - 2*pad) * (y - minY) / (maxY - minY || 1);
+                                    const path = data.map((d, i) => `${i===0?'M':'L'} ${scaleX(d.t)} ${scaleY(d.c)}`).join(' ');
+                                    return (
+                                        <g>
+                                            <path d={path} stroke="#3b82f6" fill="none" strokeWidth="2" />
+                                        </g>
+                                    );
+                                })()}
+                            </svg>
+                        </div>
+                    </div>
+                </Card>
+            )}
 
             {analysis && (
                 <Card>

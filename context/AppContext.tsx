@@ -13,27 +13,46 @@ interface UserData {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const defaultUserData: UserData = {
-    portfolio: [
-        { id: '1', ticker: 'AAPL', name: 'Apple Inc.', shares: 50, avgPrice: 150, currentPrice: 175.28 },
-        { id: '2', ticker: 'MSFT', name: 'Microsoft Corp.', shares: 30, avgPrice: 300, currentPrice: 334.75 },
-    ],
-    goals: [
-        { id: '1', name: 'Buy a new car', targetAmount: 350000, currentAmount: 120000 },
-        { id: '2', name: 'Home Loan Repayment', targetAmount: 1000000, currentAmount: 450000, isLoan: true },
-    ],
+    portfolio: [],
+    goals: [],
     expenses: [],
-    monthlyIncome: 75000,
+    monthlyIncome: 0,
+};
+
+const DATA_VERSION = 3; // bump when we change default seeding rules
+
+const migrateUserData = (email: string, data: UserData): UserData => {
+    try {
+        const versionKey = `dataVersion_${email}`;
+        const storedVersion = parseInt(localStorage.getItem(versionKey) || '0', 10);
+        if (storedVersion < DATA_VERSION) {
+            // Remove any previously seeded demo portfolio/expenses
+            const migrated: UserData = {
+                portfolio: [],
+                goals: [],
+                expenses: [],
+                monthlyIncome: 0,
+            };
+            localStorage.setItem(versionKey, String(DATA_VERSION));
+            saveUserData(email, migrated);
+            return migrated;
+        }
+    } catch (e) {
+        // ignore migration errors, return data as-is
+    }
+    return data;
 };
 
 const getUserData = (email: string): UserData => {
     try {
         const data = localStorage.getItem(`userData_${email}`);
         if (data) {
-            return JSON.parse(data);
+            const parsed = JSON.parse(data);
+            return migrateUserData(email, parsed);
         } else {
             // Setup default data for new user
             saveUserData(email, defaultUserData);
-            return defaultUserData;
+            return migrateUserData(email, defaultUserData);
         }
     } catch (error) {
         console.error("Failed to parse user data from localStorage", error);
@@ -86,7 +105,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const addStock = (stock: Omit<PortfolioItem, 'id' | 'currentPrice'>): TransactionResult => {
         if (!userData) return { success: false };
-        const purchaseCost = stock.shares * stock.avgPrice;
+        const sharesNum = Number(stock.shares);
+        const avgPriceNum = Number(stock.avgPrice);
+        if (!isFinite(sharesNum) || sharesNum <= 0 || !isFinite(avgPriceNum) || avgPriceNum <= 0) {
+            return { success: false, message: 'Invalid shares or average price.' };
+        }
+        const purchaseCost = sharesNum * avgPriceNum;
         const transactionDate = new Date().toISOString().slice(0, 10);
         
         const budgetCheck = checkBudget(purchaseCost, transactionDate);
@@ -97,7 +121,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const newStock: PortfolioItem = {
             ...stock,
             id: new Date().toISOString(),
-            currentPrice: stock.avgPrice,
+            shares: sharesNum,
+            avgPrice: avgPriceNum,
+            currentPrice: avgPriceNum,
         };
         const newPortfolio = [...userData.portfolio, newStock];
 
@@ -119,8 +145,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const originalStock = userData.portfolio.find(s => s.id === id);
         if (!originalStock) return { success: false };
 
+        const newShares = updates.shares !== undefined ? Number(updates.shares) : originalStock.shares;
+        const newAvg = updates.avgPrice !== undefined ? Number(updates.avgPrice) : originalStock.avgPrice;
+        if (!isFinite(newShares) || newShares <= 0 || !isFinite(newAvg) || newAvg <= 0) {
+            return { success: false, message: 'Invalid shares or average price.' };
+        }
         const originalCost = originalStock.shares * originalStock.avgPrice;
-        const newCost = (updates.shares || originalStock.shares) * (updates.avgPrice || originalStock.avgPrice);
+        const newCost = newShares * newAvg;
         
         const originalExpense = userData.expenses.find(e => e.id === `exp_buy_${id}`);
         const expenseDate = originalExpense ? originalExpense.date : new Date().toISOString().slice(0, 10);
@@ -131,12 +162,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
         
         const updatedPortfolio = userData.portfolio.map(stock =>
-            stock.id === id ? { ...stock, ...updates } : stock
+            stock.id === id ? { ...stock, ...updates, shares: newShares, avgPrice: newAvg } : stock
         );
         
         const updatedExpenses = userData.expenses.map(exp => {
             if (exp.id === `exp_buy_${id}`) {
-                return { ...exp, amount: newCost, description: `Bought ${updates.shares || originalStock.shares} of ${updates.ticker || originalStock.ticker}` };
+                return { ...exp, amount: newCost, description: `Bought ${newShares} of ${updates.ticker || originalStock.ticker}` };
             }
             return exp;
         });
